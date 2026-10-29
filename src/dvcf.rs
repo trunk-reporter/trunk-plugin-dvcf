@@ -125,8 +125,12 @@ pub fn build(record: &CallRecord, frames: &[VoiceFrame], p: Provenance) -> Resul
     if frames.is_empty() {
         return Err("no frames".into());
     }
-    let start_us = if record.start_time_ms > 0 { record.start_time_ms as u64 * 1000 } else { (record.start_time.max(0) as u64).saturating_mul(1_000_000) };
-    let duration_ms = if record.call_length_ms > 0 { record.call_length_ms as u32 } else { (record.call_length * 1000.0).round() as u32 };
+    let start_us = if record.start_time_ms > 0 {
+        (record.start_time_ms as u64).saturating_mul(1000)
+    } else {
+        (record.start_time.max(0) as u64).saturating_mul(1_000_000)
+    };
+    let duration_ms = if record.call_length_ms > 0 { u32::try_from(record.call_length_ms).unwrap_or(u32::MAX) } else { (record.call_length * 1000.0).round() as u32 };
     let tg = record.talkgroup;
     let call_id = record.call_num as u32;
     let mut w = Writer::default();
@@ -160,7 +164,7 @@ pub fn build(record: &CallRecord, frames: &[VoiceFrame], p: Provenance) -> Resul
         put_u32(&mut b, tg);
         put_u32(&mut b, talker_at(record, k));
         put_u32(&mut b, call_id);
-        put_u64(&mut b, start_us + k as u64 * FRAME_US);
+        put_u64(&mut b, start_us.saturating_add(k as u64 * FRAME_US));
         b.extend_from_slice(&[codec_type, params.len() as u8, errs, u8::from(silent)]);
         params.iter().for_each(|&v| put_u32(&mut b, v));
         w.message(CODEC_FRAME, &b);
@@ -494,8 +498,17 @@ mod tests {
         let mut frames = fixtures::frames(Codec::Imbe, 2);
         frames[0].errs = 300;
         frames[1].errs = u32::MAX;
-        let r = CallRecord { call_num: u64::from(u32::MAX) + 5, short_name: "s".repeat(300), ..Default::default() };
+        let r = CallRecord {
+            call_num: u64::from(u32::MAX) + 5,
+            short_name: "s".repeat(300),
+            start_time_ms: i64::MAX,
+            call_length_ms: u32::MAX as i64 + 5,
+            ..Default::default()
+        };
         let m = read::messages(&build(&r, &frames, p()).unwrap().bytes);
+        assert!(matches!(m[0], Msg::Start { ts: u64::MAX, .. }), "{:?}", m[0]);
+        assert!(matches!(m[2], Msg::Frame { ts: u64::MAX, .. }), "{:?}", m[2]);
+        assert!(matches!(m[4], Msg::End { dur_ms: u32::MAX, .. }), "{:?}", m[4]);
         assert!(matches!(m[0], Msg::Start { call_id: 4, ref name, .. } if name.len() == 255));
         let errs: Vec<u8> = m
             .iter()
