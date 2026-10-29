@@ -12,7 +12,7 @@ use trunk_recorder_plugin::{ConcludedCall, Setup};
 
 use crate::config::{Config, SystemConfig};
 use crate::dvcf::{Provenance, build};
-use crate::frames::{find, read};
+use crate::frames::{ReadError, find, read};
 use crate::output::{target, write_atomic};
 use crate::queue::{Done, Job, Kind};
 
@@ -87,8 +87,8 @@ pub fn count_skip(ctx: &Ctx, reason: &str) {
 }
 
 /// One try at `job`: the skip rules, then the frames file read, built and written. A catch-up job leaves a `.dvcf` already there
-/// alone. A frames file that cannot be read, or a file that cannot be written, asks for a retry; each warning the build gives is passed
-/// to `warn`, prefixed with the call's path.
+/// alone. A frames file that cannot be read, or a file that cannot be written, asks for a retry; a frames file that does not parse
+/// fails at once, naming the file. Each warning the build gives is passed to `warn`, prefixed with the call's path.
 pub fn process(ctx: &Ctx, job: &Job, warn: &dyn Fn(String)) -> Done {
     let call = &job.call;
     if let Some(reason) = skip_reason(ctx, call) {
@@ -106,17 +106,16 @@ pub fn process(ctx: &Ctx, job: &Job, warn: &dyn Fn(String)) -> Done {
         return Done::Skipped(NO_FRAMES.into());
     };
     let started = Instant::now();
+    let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let frames = match read(&file, source) {
         Ok(frames) => frames,
-        Err(e) => return Done::Retry(e),
+        Err(ReadError::Io(e)) => return Done::Retry(e),
+        Err(ReadError::Parse(e)) => return Done::Failed(format!("{name}: {e}")),
     };
     let provenance = Provenance { host_version: &ctx.host_version, plugin_version: env!("CARGO_PKG_VERSION"), source };
     let built = match build(&call.call, &frames, provenance) {
         Ok(built) => built,
-        Err(e) if e == "no frames" => {
-            let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            return Done::Failed(format!("no frames in {name}"));
-        }
+        Err(e) if e == "no frames" => return Done::Failed(format!("no frames in {name}")),
         Err(e) => return Done::Failed(e),
     };
     for w in built.warnings {
@@ -243,6 +242,12 @@ mod tests {
         let ctx = ctx_for(&dir, vec![]);
         let call = fixtures::jsonl_call(&dir, 33, &[]);
         assert!(matches!(process(&ctx, &job(call.clone(), Kind::Live), &|_| {}), Done::Failed(m) if m.starts_with("no frames in ")));
+        // A frames file that does not parse fails at once (a retry would read the same), naming the file.
+        let jsonl = call.files.json.with_extension("frames.jsonl");
+        std::fs::write(&jsonl, "{not json\n").unwrap();
+        let name = jsonl.file_name().unwrap().to_string_lossy().into_owned();
+        let done = process(&ctx, &job(call.clone(), Kind::Live), &|_| {});
+        assert!(matches!(&done, Done::Failed(m) if m.starts_with(&format!("{name}: line 1: "))), "{done:?}");
         let mut frames = fixtures::frames(Codec::Ambe, 2);
         frames.extend(fixtures::frames(Codec::Imbe, 1));
         let mut odd = fixtures::jsonl_call(&dir, 34, &frames);

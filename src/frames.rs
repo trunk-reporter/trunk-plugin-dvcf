@@ -40,16 +40,25 @@ pub fn find(json: &Path, capture_dir: &Path, path: &str) -> Option<(PathBuf, Sou
     beside.chain(captured).find(|(f, _)| f.is_file())
 }
 
+/// Why a frames file could not be read.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ReadError {
+    /// The file could not be read (worth a retry): `cannot read <file>: <why>`.
+    Io(String),
+    /// The file was read but is not frames (a retry would read the same): `line <n>: <why>`.
+    Parse(String),
+}
+
 /// The frames in `file`, read as `source`.
-pub fn read(file: &Path, source: Source) -> Result<Vec<VoiceFrame>, String> {
-    let bytes = std::fs::read(file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+pub fn read(file: &Path, source: Source) -> Result<Vec<VoiceFrame>, ReadError> {
+    let bytes = std::fs::read(file).map_err(|e| ReadError::Io(format!("cannot read {}: {e}", file.display())))?;
     match source {
         Source::Sdr => Ok(sdr_frames(&bytes)),
         Source::Jsonl => String::from_utf8_lossy(&bytes)
             .lines()
             .enumerate()
             .filter(|(_, l)| !l.trim().is_empty())
-            .map(|(k, l)| jsonl_frame(l).map_err(|why| format!("line {}: {why}", k + 1)))
+            .map(|(k, l)| jsonl_frame(l).map_err(|why| ReadError::Parse(format!("line {}: {why}", k + 1))))
             .collect(),
     }
 }
@@ -146,10 +155,10 @@ mod tests {
     #[test]
     fn bad_files_are_errors_that_say_where() {
         let dir = testing::temp_dir("frames");
-        assert!(read(&dir.join("none.sdr"), Source::Sdr).unwrap_err().starts_with("cannot read "));
+        assert!(matches!(read(&dir.join("none.sdr"), Source::Sdr), Err(ReadError::Io(m)) if m.starts_with("cannot read ")));
         let f = dir.join("x.frames.jsonl");
         std::fs::write(&f, "{\"pos\":0.0,\"codec\":\"imbe\",\"bits\":\"zz\",\"e0\":0,\"errs\":0,\"erased\":false,\"out\":\"voice\"}\n").unwrap();
-        assert!(read(&f, Source::Jsonl).unwrap_err().starts_with("line 1: "));
+        assert!(matches!(read(&f, Source::Jsonl), Err(ReadError::Parse(m)) if m.starts_with("line 1: ")));
         std::fs::write(&f, "").unwrap();
         assert_eq!(read(&f, Source::Jsonl).unwrap(), vec![]);
         std::fs::write(&f, "not sdr at all").unwrap();
