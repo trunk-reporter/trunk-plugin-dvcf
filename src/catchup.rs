@@ -102,12 +102,20 @@ impl CatchUp {
         self.queued_total
     }
 
-    /// Starts a pass over the last `catchUpDays` days (all of them when it is 0); false when one is running.
+    /// Starts a pass over the last `catchUpDays` days (all of them when it is 0), never reaching back past `retentionDays` when
+    /// that is set (a file written older would be swept at once); false when one is running.
     pub fn begin(&mut self, mode: Mode, now_ms: i64) -> bool {
         if self.pass.is_some() {
             return false;
         }
-        let days = read_lock(&self.ctx.config).catch_up_days;
+        let days = {
+            let c = read_lock(&self.ctx.config);
+            match (c.catch_up_days, c.retention_days) {
+                (days, 0) => days,
+                (0, keep) => keep,
+                (days, keep) => days.min(keep),
+            }
+        };
         let from = (days > 0).then(|| now_ms - i64::from(days) * DAY_MS);
         let stop_early = match mode {
             Mode::Periodic => !std::mem::take(&mut self.resume),
@@ -422,6 +430,27 @@ mod tests {
         f.ctx.config.write().unwrap().catch_up_days = 2;
         assert!(f.catchup.begin(Mode::Start, NOW));
         assert_eq!(queries(&f)[1].1.from, Some(NOW - 2 * DAY_MS));
+    }
+
+    #[test]
+    fn retention_clamps_the_window() {
+        let dir = testing::temp_dir("catchup");
+        let mut f = fixture(&dir);
+        let mut from = |catch_up_days: u32, retention_days: u32| {
+            {
+                let mut c = f.ctx.config.write().unwrap();
+                (c.catch_up_days, c.retention_days) = (catch_up_days, retention_days);
+            }
+            assert!(f.catchup.begin(Mode::Start, NOW));
+            let (req, query) = queries(&f).pop().unwrap();
+            assert!(f.catchup.on_page(req, page(vec![], None)));
+            query.from
+        };
+        assert_eq!(from(30, 7), Some(NOW - 7 * DAY_MS), "30 days back, but files are kept 7");
+        assert_eq!(from(0, 7), Some(NOW - 7 * DAY_MS), "as far as the store goes, but files are kept 7");
+        assert_eq!(from(3, 7), Some(NOW - 3 * DAY_MS), "inside the retention: unchanged");
+        assert_eq!(from(30, 0), Some(NOW - 30 * DAY_MS), "no retention: unchanged");
+        assert_eq!(from(0, 0), None);
     }
 
     #[test]

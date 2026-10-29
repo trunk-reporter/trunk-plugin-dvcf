@@ -34,7 +34,7 @@ All four apply while the recorder runs. [`examples/settings.json`](examples/sett
 | `outputDir` | empty | Where the files go. Empty: in the capture folder, next to each call's other files. Otherwise an absolute folder path. |
 | `retentionDays` | `0` | Delete `.dvcf` files older than this many days. 0 keeps them for ever. |
 | `catchUp` | `true` | Convert past calls that still have a frames file and no `.dvcf`: at start, then every 10 minutes. |
-| `catchUpDays` | `30` | How far back the catch-up looks. 0: as far as the recorder's call store goes. |
+| `catchUpDays` | `30` | How far back the catch-up looks. 0: as far as the recorder's call store goes. Never past `retentionDays` when that is set. |
 
 A relative `outputDir` is refused, and the card says so until good settings come.
 
@@ -49,7 +49,8 @@ again (after a recorder restart, say) has its file replaced by the newer one.
 
 **Retention.** With `retentionDays` above 0, once an hour the plugin walks the output layout and deletes `.dvcf` files
 whose modification time is older. It removes nothing else. In the capture folder, Trunk Recorder Pro's own cleanup
-removes the call's other files; this removes the `.dvcf` files it doesn't know about.
+removes the call's other files; this removes the `.dvcf` files it doesn't know about. The catch-up never reaches back
+past `retentionDays`, so it never writes a file the next sweep would delete.
 
 ## Catching up
 

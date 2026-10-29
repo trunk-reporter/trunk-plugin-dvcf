@@ -23,7 +23,7 @@ pub struct Config {
     pub catch_up: bool,
     /// Catch up (days)
     ///
-    /// How far back the catch-up looks. 0: as far as the call store goes.
+    /// How far back the catch-up looks. 0: as far as the call store goes. Never further back than Keep for (days), when that is set.
     pub catch_up_days: u32,
 }
 
