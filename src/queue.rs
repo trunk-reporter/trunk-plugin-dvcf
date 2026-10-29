@@ -337,24 +337,28 @@ impl Queue {
     /// call joins a saved or catch-up job for it, which then answers the
     /// recorder (true); anything else is refused (false, and nothing happens).
     /// Once shutdown has begun, a live call is answered at once with "shutting
-    /// down" (true) and any other is dropped (false).
+    /// down" (true), unless a live job for its path is in flight and will
+    /// answer for itself (false); any other is dropped (false).
     pub fn push(&self, call: ConcludedCall, kind: Kind) -> bool {
         let s = &self.shared;
         let job = Job { call, kind, enqueued: Instant::now(), tries: 0 };
         let mut inner = s.lock();
-        if inner.paths.contains(&job.call.path) {
-            let joined = job.kind == Kind::Live && inner.join_live(job);
-            s.changed.notify_all();
-            return joined;
-        }
+        // Once closing, nothing joins a job: shutdown may already have handed
+        // back what it will, so a joined end could go nowhere.
         if inner.closing {
-            if job.kind != Kind::Live {
+            let answers = inner.flying.get(&job.call.path).is_some_and(|f| f.kind == Kind::Live && !f.answered);
+            if job.kind != Kind::Live || answers {
                 return false;
             }
             inner.stats.failed += 1;
             drop(inner);
             s.answer(&job.call.path, &End::Failed("shutting down".into()));
             return true;
+        }
+        if inner.paths.contains(&job.call.path) {
+            let joined = job.kind == Kind::Live && inner.join_live(job);
+            s.changed.notify_all();
+            return joined;
         }
         inner.paths.insert(job.call.path.clone());
         if job.kind == Kind::CatchUp {
@@ -645,6 +649,32 @@ mod tests {
         assert!(!q.push(calls[5].clone(), Kind::CatchUp), "others are dropped");
         assert_eq!(out.output().results(), vec![result(&p[4], Outcome::Failed, "shutting down")]);
         assert!(q.is_empty());
+    }
+
+    #[test]
+    fn a_live_push_after_shutdown_never_joins_a_catch_up_job_in_flight() {
+        let (host, out) = testing::capture();
+        let (open, shut) = gate();
+        let started = Arc::new(Mutex::new(0u32));
+        let s = started.clone();
+        let q = Queue::start(host, opts(), move |_: &Job| {
+            *s.lock().unwrap() += 1;
+            let _ = shut.lock().unwrap().recv();
+            Done::Retry("disk".into())
+        });
+        let dir = testing::temp_dir("queue-shutdown-join");
+        let c = call(&dir, 1);
+        let p = c.path.clone();
+        assert!(q.push(c.clone(), Kind::CatchUp));
+        wait_for("the catch-up job to start", || *started.lock().unwrap() == 1);
+        assert!(q.shutdown(Duration::from_millis(20)).is_empty(), "a catch-up job in flight is not handed back");
+
+        assert!(q.push(c, Kind::Live), "answered at once, not joined to the catch-up job");
+        let want = vec![result(&p, Outcome::Failed, "shutting down")];
+        assert_eq!(out.output().results(), want);
+        drop(open);
+        wait_for("the catch-up job to end", || q.is_empty());
+        assert_eq!(out.output().results(), want, "its late end sends nothing more");
     }
 
     #[test]
