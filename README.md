@@ -62,7 +62,7 @@ back than `retentionDays`, when that is set), newest first, and converts each on
 `.dvcf`. The pass at start walks the whole window; the passes every 10 minutes stop at the first page with nothing left
 to do. Any pass pauses once 2000 calls are waiting to be converted, and the next one then walks the whole window again
 to take up the rest. Live calls always go ahead of catch-up work. The catch-up **never overwrites** a `.dvcf` that is
-there, and does not try again a call whose conversion failed until the plugin next starts. The log says how many were
+there, and does not try again a call whose conversion failed outright until the plugin next starts (one that failed after its write retries is tried again). The log says how many were
 queued at the end of each pass. If the call store is off, the plugin warns in the log at each pass that finds it off,
 and the card shows a warning until a pass gets an answer from the store.
 
