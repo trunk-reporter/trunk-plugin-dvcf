@@ -430,6 +430,27 @@ mod tests {
     }
 
     #[test]
+    fn a_start_pass_goes_on_past_a_page_with_nothing_queued_and_a_periodic_one_does_not() {
+        let dir = testing::temp_dir("catchup");
+        let mut f = fixture(&dir);
+        let b = written(&dir, 2);
+        assert!(f.catchup.begin(Mode::Start, NOW));
+        let req = queries(&f)[0].0;
+        assert!(f.catchup.on_page(req, page(vec![b.clone()], Some("500"))));
+        assert_eq!(queries(&f).len(), 2, "the start pass asked for the next page");
+        assert!(f.catchup.running());
+        let req = queries(&f)[1].0;
+        assert!(f.catchup.on_page(req, page(vec![], None)));
+        assert!(!f.catchup.running());
+
+        assert!(f.catchup.begin(Mode::Periodic, NOW));
+        let req = queries(&f)[2].0;
+        assert!(f.catchup.on_page(req, page(vec![b], Some("500"))));
+        assert_eq!(queries(&f).len(), 3, "the periodic pass stopped at the same page");
+        assert!(!f.catchup.running());
+    }
+
+    #[test]
     fn zero_days_means_no_lower_bound() {
         let dir = testing::temp_dir("catchup");
         let mut f = fixture(&dir);
