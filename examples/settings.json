@@ -1,0 +1,6 @@
+{
+  "outputDir": "",
+  "retentionDays": 0,
+  "catchUp": true,
+  "catchUpDays": 30
+}
