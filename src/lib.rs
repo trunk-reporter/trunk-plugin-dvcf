@@ -7,3 +7,4 @@ pub mod fixtures;
 pub mod frames;
 pub mod output;
 pub mod plugin;
+pub mod queue;
