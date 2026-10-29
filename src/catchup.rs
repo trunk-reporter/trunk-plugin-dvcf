@@ -3,7 +3,7 @@
 //! no `.dvcf`. It queues at most a budget of catch-up work; past that it
 //! pauses, and the next pass takes up the rest.
 
-use std::sync::{Arc, RwLock, RwLockReadGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
 
 use trunk_recorder_plugin::{CallFiles, CallsPage, CallsQuery, ConcludedCall, Host, StoredCall};
@@ -80,6 +80,11 @@ pub struct CatchUp {
 /// A read lock, even on a lock a panic poisoned: the data behind it is plain settings.
 fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
     lock.read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A mutex's guard, even on one a panic poisoned: the data behind it is a plain set.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl CatchUp {
@@ -183,6 +188,11 @@ impl CatchUp {
         let output_dir = read_lock(&self.ctx.config).output_dir();
         let mut tally = Tally::default();
         for e in entries {
+            // A call whose job failed this run would only fail again: left for the next run.
+            if lock(&self.ctx.failed).contains(&e.path) {
+                tally.skipped += 1;
+                continue;
+            }
             let call = self.concluded(e);
             if skip_reason(&self.ctx, &call).is_some() {
                 tally.skipped += 1;
@@ -254,6 +264,7 @@ mod tests {
             host_version: "0.3.0".into(),
             skipped: Arc::default(),
             write_error: Arc::default(),
+            failed: Arc::default(),
         }
     }
 
@@ -431,6 +442,23 @@ mod tests {
         f.ctx.config.write().unwrap().catch_up_days = 2;
         assert!(f.catchup.begin(Mode::Start, NOW));
         assert_eq!(queries(&f)[1].1.from, Some(NOW - 2 * DAY_MS));
+    }
+
+    #[test]
+    fn a_call_that_failed_this_run_is_not_queued_again() {
+        let dir = testing::temp_dir("catchup");
+        let mut f = fixture(&dir);
+        // A frames file with no frames in it: its job fails.
+        let bad = fixtures::jsonl_call(&dir, 8, &[]);
+        let job = crate::queue::Job { call: bad.clone(), kind: Kind::CatchUp, enqueued: Instant::now(), tries: 0 };
+        assert!(matches!(crate::work::process(&f.ctx, &job, &|_| {}), Done::Failed(_)));
+        let stored = StoredCall { path: bad.path.clone(), record: bad.call.clone(), audio: true, json: true };
+        let (good, _) = convertible(&dir, 9);
+        assert!(f.catchup.begin(Mode::Start, NOW));
+        let req = queries(&f)[0].0;
+        assert!(f.catchup.on_page(req, page(vec![stored, good.clone()], None)));
+        assert_eq!(drained(&f, 1), [(Kind::CatchUp, good.path.clone())], "only the good call is queued");
+        assert!(logs(&f, Level::Info).contains(&"catch-up: 1 queued, 1 skipped, 0 already written, 1 pages".to_string()), "{:?}", logs(&f, Level::Info));
     }
 
     #[test]

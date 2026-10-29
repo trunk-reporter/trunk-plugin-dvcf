@@ -3,7 +3,7 @@
 //! First the skip rules (a disabled system, an analog or ProVoice call, a call with no audio, a call with no frames file), then the frames file is read,
 //! built into a `.dvcf` and written whole. A live or saved job overwrites a `.dvcf` already there; a catch-up job never does.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard};
 use std::time::Instant;
@@ -46,6 +46,9 @@ pub struct Ctx {
     pub skipped: Arc<Mutex<BTreeMap<String, u64>>>,
     /// Why the last write failed, until a call is written again: the status shows it.
     pub write_error: Arc<Mutex<Option<String>>>,
+    /// The paths whose job failed outright this run, so the catch-up does not queue them again and again. Only a `Failed` this
+    /// work returns is remembered; a job the queue gives up on after its retries is not (it may well work next time).
+    pub failed: Arc<Mutex<HashSet<String>>>,
 }
 
 /// A read lock, even on a lock a panic poisoned: the data behind it is plain settings.
@@ -88,8 +91,17 @@ pub fn count_skip(ctx: &Ctx, reason: &str) {
 
 /// One try at `job`: the skip rules, then the frames file read, built and written. A catch-up job leaves a `.dvcf` already there
 /// alone. A frames file that cannot be read, or a file that cannot be written, asks for a retry; a frames file that does not parse
-/// fails at once, naming the file. Each warning the build gives is passed to `warn`, prefixed with the call's path.
+/// fails at once, naming the file. Each warning the build gives is passed to `warn`, prefixed with the call's path. A job that fails
+/// has its path remembered in `ctx.failed`.
 pub fn process(ctx: &Ctx, job: &Job, warn: &dyn Fn(String)) -> Done {
+    let done = attempt(ctx, job, warn);
+    if matches!(done, Done::Failed(_)) {
+        lock(&ctx.failed).insert(job.call.path.clone());
+    }
+    done
+}
+
+fn attempt(ctx: &Ctx, job: &Job, warn: &dyn Fn(String)) -> Done {
     let call = &job.call;
     if let Some(reason) = skip_reason(ctx, call) {
         count_skip(ctx, &reason);
@@ -152,6 +164,7 @@ mod tests {
             host_version: "0.3.0".into(),
             skipped: Arc::default(),
             write_error: Arc::default(),
+            failed: Arc::default(),
         }
     }
 
@@ -248,6 +261,7 @@ mod tests {
         let name = jsonl.file_name().unwrap().to_string_lossy().into_owned();
         let done = process(&ctx, &job(call.clone(), Kind::Live), &|_| {});
         assert!(matches!(&done, Done::Failed(m) if m.starts_with(&format!("{name}: line 1: "))), "{done:?}");
+        assert!(ctx.failed.lock().unwrap().contains(&call.path), "a failed path is remembered");
         let mut frames = fixtures::frames(Codec::Ambe, 2);
         frames.extend(fixtures::frames(Codec::Imbe, 1));
         let mut odd = fixtures::jsonl_call(&dir, 34, &frames);

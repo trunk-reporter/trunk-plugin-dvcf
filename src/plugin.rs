@@ -101,6 +101,7 @@ impl Plugin for Dvcf {
             host_version: setup.host.version.clone(),
             skipped: Arc::default(),
             write_error: Arc::default(),
+            failed: Arc::default(),
         };
         let queue = {
             let (work_ctx, work_host) = (ctx.clone(), host.clone());
@@ -747,6 +748,7 @@ mod tests {
             host_version: "0".into(),
             skipped: Arc::new(Mutex::new(BTreeMap::from([("analog".to_string(), 2)]))),
             write_error: Arc::default(),
+            failed: Arc::default(),
         };
         let snap = Snapshot {
             queued: 3,
