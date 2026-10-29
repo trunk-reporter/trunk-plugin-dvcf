@@ -81,10 +81,11 @@ fn unit(src: i64) -> u32 {
     u32::try_from(src).unwrap_or(0)
 }
 
-/// The talker at `pos` seconds into the call: the `srcList` entry with the greatest `pos` not past it (the later on a tie); 0 when none.
-fn talker_at(record: &CallRecord, pos: f64) -> u32 {
+/// The talker at frame `k`: the `srcList` entry with the greatest `pos` not past the frame (the later on a tie); 0 when none.
+/// Positions are compared in whole frames (`pos` × 50, rounded), so a talker at 0.06 s takes frame 3 whatever the float error.
+fn talker_at(record: &CallRecord, k: usize) -> u32 {
     let mut best: Option<(f64, i64)> = None;
-    for s in record.src_list.iter().filter(|s| s.pos <= pos) {
+    for s in record.src_list.iter().filter(|s| (s.pos * 50.0).round() as i64 <= k as i64) {
         if best.is_none_or(|(p, _)| s.pos >= p) {
             best = Some((s.pos, s.src));
         }
@@ -157,7 +158,7 @@ pub fn build(record: &CallRecord, frames: &[VoiceFrame], p: Provenance) -> Resul
         error_count = error_count.saturating_add(u32::from(errs));
         let mut b = Vec::with_capacity(24 + 4 * params.len());
         put_u32(&mut b, tg);
-        put_u32(&mut b, talker_at(record, k as f64 * 0.02));
+        put_u32(&mut b, talker_at(record, k));
         put_u32(&mut b, call_id);
         put_u64(&mut b, start_us + k as u64 * FRAME_US);
         b.extend_from_slice(&[codec_type, params.len() as u8, errs, u8::from(silent)]);
@@ -472,6 +473,20 @@ mod tests {
         assert_eq!(srcs, [0, 0, 9, 9, 9], "-1 is unknown; a tie takes the later entry; a talker past the end never comes");
         assert!(matches!(read::messages(&build(&r, &frames, p()).unwrap().bytes).last(), Some(Msg::End { src: 11, .. })));
         assert_eq!(build(&r, &[], p()).unwrap_err(), "no frames");
+
+        // A talker at 0.06 s takes over at frame 3 exactly, and one a hair past it too: frames, not float seconds.
+        let frames = fixtures::frames(Codec::Imbe, 6);
+        for pos in [0.06, 0.060_000_000_1] {
+            r.src_list = vec![SrcEntry { src: 1, pos: 0.0, ..Default::default() }, SrcEntry { src: 2, pos, ..Default::default() }];
+            let srcs: Vec<u32> = read::messages(&build(&r, &frames, p()).unwrap().bytes)
+                .iter()
+                .filter_map(|m| match m {
+                    Msg::Frame { src, .. } => Some(*src),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(srcs, [1, 1, 1, 2, 2, 2], "talker 2 at {pos}");
+        }
     }
 
     #[test]
