@@ -206,7 +206,9 @@ stays 2, since readers are told to ignore unknown JSON keys and nothing else cha
 On `call.concluded`:
 
 1. Skip, with `call.result skipped` and a reason, when: the system is disabled in the plugin's
-   settings; `record.audio_type` is `analog`; `voice_mode` is `provoice`; or no frames file exists
+   settings; `record.audio_type` is `analog`; `voice_mode` is `provoice`; the call has no audio
+   (`call_length_ms` and `call_length` both 0: an encrypted or silent call kept with keepEncrypted /
+   keepSilent, for which TRP writes no frames; reason "no audio", no warning); or no frames file exists
    (reason "no frames file: turn on captureFrames in Recording settings"). The missing-file case
    also sets the plugin's status to **warning** with that message, once, until a call with a
    frames file arrives.
@@ -228,7 +230,7 @@ On `call.concluded`:
 
 With `catchUp` on: at start, then every 10 minutes, page the call store newest first from
 `now − catchUpDays` (no `from` when 0), 500 a page, `system` unset. For each entry: skip when the
-system is disabled, the record is analog or ProVoice, the output `.dvcf` already exists, or no
+system is disabled, the record is analog or ProVoice or has no audio, the output `.dvcf` already exists, or no
 frames file exists; otherwise queue it as a catch-up job. The pass stops early at the first page
 where nothing was queued and nothing lacked only a `.dvcf` (everything older is settled), and
 always stops at the end of the store or on a page `error` (store off: warn once). Catch-up jobs

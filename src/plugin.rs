@@ -506,6 +506,16 @@ mod tests {
         assert_eq!(out.status(), Some((State::Ok, "writing beside the calls".to_string())));
         let skipped = out.metrics().last().expect("metrics").extra["skipped"].clone();
         assert_eq!(skipped, json!({ "analog": 1, "system disabled": 1, NO_FRAMES: 1 }));
+
+        // A call kept with no audio (keepEncrypted / keepSilent) has no frames file either, but it is not a captureFrames problem.
+        let mut silent = testing::call(&dir, "sys1", 114);
+        (silent.call.call_length_ms, silent.call.call_length) = (0, 0.0);
+        let out = testing::run::<Dvcf>([HostMessage::Hello(testing::hello(&dir, json!({ "catchUp": false }))), HostMessage::CallConcluded(silent.clone())]);
+        let results: Vec<_> = out.results().into_iter().map(|r| (r.0, r.1, r.2)).collect();
+        assert_eq!(results, [(silent.path.clone(), Outcome::Skipped, "no audio".to_string())]);
+        let after = self::statuses(&out);
+        assert!(!after.is_empty() && after.iter().all(|s| s.0 == State::Ok), "no warning: {after:?}");
+        assert_eq!(out.metrics().last().expect("metrics").extra["skipped"], json!({ "no audio": 1 }));
     }
 
     #[test]

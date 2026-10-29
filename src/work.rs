@@ -1,6 +1,6 @@
 //! The work: one job, from a call's frames file to its `.dvcf`.
 //!
-//! First the skip rules (a disabled system, an analog or ProVoice call, a call with no frames file), then the frames file is read,
+//! First the skip rules (a disabled system, an analog or ProVoice call, a call with no audio, a call with no frames file), then the frames file is read,
 //! built into a `.dvcf` and written whole. A live or saved job overwrites a `.dvcf` already there; a catch-up job never does.
 
 use std::collections::BTreeMap;
@@ -56,8 +56,9 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Why `call` is not written, if it is not: its system is disabled, it is analog or ProVoice, or it has no frames file (in that order).
-/// A system not in the list counts as enabled.
+/// Why `call` is not written, if it is not: its system is disabled, it is analog or ProVoice, it has no audio, or it has no frames file
+/// (in that order). A system not in the list counts as enabled. A call with no audio (an encrypted or silent one the recorder kept
+/// with keepEncrypted or keepSilent) never has frames written, so it is skipped before the frames-file rule, which would warn.
 pub fn skip_reason(ctx: &Ctx, call: &ConcludedCall) -> Option<String> {
     let record = &call.call;
     if read_lock(&ctx.systems).iter().any(|s| s.short_name == record.short_name && !s.enabled) {
@@ -68,6 +69,9 @@ pub fn skip_reason(ctx: &Ctx, call: &ConcludedCall) -> Option<String> {
     }
     if record.voice_mode == "provoice" {
         return Some("ProVoice".into());
+    }
+    if record.call_length_ms == 0 && record.call_length == 0.0 {
+        return Some("no audio".into());
     }
     if find(&call.files.json, &ctx.capture_dir, &call.path).is_none() {
         return Some(NO_FRAMES.into());
@@ -161,7 +165,14 @@ mod tests {
         let mut pv = call.clone();
         pv.call.voice_mode = "provoice".into();
         assert_eq!(skip_reason(&ctx, &pv).as_deref(), Some("ProVoice"));
+        let mut silent = call.clone();
+        (silent.call.call_length_ms, silent.call.call_length) = (0, 0.0);
+        assert_eq!(skip_reason(&ctx, &silent).as_deref(), Some("no audio"));
+        let mut old = silent.clone();
+        old.call.call_length = 0.5;
+        assert_eq!(skip_reason(&ctx, &old), None, "an old record without call_length_ms has audio by call_length");
         std::fs::remove_file(call.files.json.with_extension("sdr")).unwrap();
+        assert_eq!(skip_reason(&ctx, &silent).as_deref(), Some("no audio"), "before the frames-file rule");
         assert_eq!(skip_reason(&ctx, &call).as_deref(), Some(NO_FRAMES));
     }
 

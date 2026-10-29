@@ -20,6 +20,9 @@ plugin's card shows a warning with the same words. The warning goes away when a 
 
 A system can also be left out: per system, `enabled` (default on). Its calls are skipped with the reason `system disabled`.
 
+An encrypted or silent call the recorder keeps without audio (with `keepEncrypted` or `keepSilent` on) has no frames to
+write: it is skipped as `no audio`, and it does not raise the captureFrames warning.
+
 ## Installing
 
 From the Trunk Recorder Pro plugin registry, once the plugin is listed there. Or download a release archive,
