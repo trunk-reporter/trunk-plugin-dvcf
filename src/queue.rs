@@ -559,7 +559,12 @@ mod tests {
         wait_for("all five done", || worked.lock().unwrap().len() == 5 && q.is_empty());
 
         let o = out.output();
-        let want = vec![result(&p[0], Outcome::Ok, ""), result(&p[1], Outcome::Skipped, "analog"), result(&p[2], Outcome::Failed, "no frames"), result(&p[4], Outcome::Ok, "")];
+        let want = vec![
+            result(&p[0], Outcome::Ok, ""),
+            result(&p[1], Outcome::Skipped, "analog"),
+            result(&p[2], Outcome::Failed, "no frames"),
+            result(&p[4], Outcome::Ok, ""),
+        ];
         assert_eq!(o.results(), want, "the catch-up job (call 4) sends nothing; the saved one (call 5) is answered");
         let took = o.messages.iter().find_map(|m| match m {
             PluginMessage::CallResult { path, took_ms, .. } if *path == p[0] => Some(*took_ms),

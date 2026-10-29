@@ -125,12 +125,10 @@ pub fn build(record: &CallRecord, frames: &[VoiceFrame], p: Provenance) -> Resul
     if frames.is_empty() {
         return Err("no frames".into());
     }
-    let start_us = if record.start_time_ms > 0 {
-        (record.start_time_ms as u64).saturating_mul(1000)
-    } else {
-        (record.start_time.max(0) as u64).saturating_mul(1_000_000)
-    };
-    let duration_ms = if record.call_length_ms > 0 { u32::try_from(record.call_length_ms).unwrap_or(u32::MAX) } else { (record.call_length * 1000.0).round() as u32 };
+    let start_us =
+        if record.start_time_ms > 0 { (record.start_time_ms as u64).saturating_mul(1000) } else { (record.start_time.max(0) as u64).saturating_mul(1_000_000) };
+    let duration_ms =
+        if record.call_length_ms > 0 { u32::try_from(record.call_length_ms).unwrap_or(u32::MAX) } else { (record.call_length * 1000.0).round() as u32 };
     let tg = record.talkgroup;
     let call_id = record.call_num as u32;
     let mut w = Writer::default();
