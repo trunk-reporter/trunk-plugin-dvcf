@@ -130,6 +130,7 @@ impl Plugin for Dvcf {
             refused: Mutex::new(None),
             output_error: Mutex::new(output_error),
             no_frames: AtomicBool::new(false),
+            closed: Mutex::new(false),
         });
         let mut upkeep = Upkeep { report: report.clone(), next_catch_up: started + CATCH_UP_EVERY, next_retain: started + RETAIN_FIRST };
         let (stop, stopped) = mpsc::channel::<()>();
@@ -201,11 +202,19 @@ impl Plugin for Dvcf {
         let t0 = Instant::now();
         let deadline = t0 + grace.mul_f64(0.9);
         let remaining = || deadline.saturating_duration_since(Instant::now());
-        // Told to stop now; joined (if it has finished) at the end, never waited on beyond the deadline.
-        let upkeep = self.upkeep.take().map(|(stop, thread)| {
+        // The upkeep sends nothing more and starts no pass or sweep; it is told to stop and given a moment to end its
+        // tick. A sweep still walking after that is left behind (detached): the gate keeps it quiet.
+        self.report.close();
+        if let Some((stop, thread)) = self.upkeep.take() {
             let _ = stop.send(());
-            thread
-        });
+            let join_by = (t0 + grace.mul_f64(0.1)).min(deadline);
+            while !thread.is_finished() && Instant::now() < join_by {
+                thread::sleep(Duration::from_millis(5));
+            }
+            if thread.is_finished() {
+                let _ = thread.join();
+            }
+        }
         // Half the grace for the queue to empty on its own; the queue's shutdown then takes at most 0.8 of what is left.
         let idle_by = t0 + grace.mul_f64(0.5);
         while !self.queue.is_empty() && Instant::now() < idle_by {
@@ -218,15 +227,7 @@ impl Plugin for Dvcf {
         if !calls.is_empty() {
             self.host.info(format!("{} live calls saved for the next start", calls.len()));
         }
-        self.report.send();
-        if let Some(thread) = upkeep {
-            while !thread.is_finished() && !remaining().is_zero() {
-                thread::sleep(Duration::from_millis(10));
-            }
-            if thread.is_finished() {
-                let _ = thread.join();
-            } // else detached: the process exits around it
-        }
+        self.report.send_last();
     }
 }
 
@@ -242,18 +243,53 @@ struct Report {
     output_error: Mutex<Option<String>>,
     /// The last live call that was looked at had no frames file.
     no_frames: AtomicBool,
+    /// Shutdown has begun: nothing but shutdown's own last report is sent. Held across each send, so the check and the
+    /// send are one step and nothing goes out after the last report.
+    closed: Mutex<bool>,
 }
 
 impl Report {
-    /// Metrics, then status.
+    /// Metrics, then status; nothing once closed.
     fn send(&self) {
+        let closed = lock(&self.closed);
+        if !*closed {
+            self.metrics_now();
+            self.status_now();
+        }
+    }
+
+    /// The status alone; nothing once closed.
+    fn send_status(&self) {
+        let closed = lock(&self.closed);
+        if !*closed {
+            self.status_now();
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        *lock(&self.closed)
+    }
+
+    /// Closes the gate: from now on only [`Report::send_last`] sends.
+    fn close(&self) {
+        *lock(&self.closed) = true;
+    }
+
+    /// Shutdown's last metrics and status, through the same gate.
+    fn send_last(&self) {
+        let mut closed = lock(&self.closed);
+        *closed = true;
+        self.metrics_now();
+        self.status_now();
+    }
+
+    fn metrics_now(&self) {
         let snap = self.queue.snapshot();
         let catch_up_queued = lock(&self.catchup).queued_total();
         self.host.metrics(&metrics_of(&snap, &self.ctx, catch_up_queued));
-        self.send_status();
     }
 
-    fn send_status(&self) {
+    fn status_now(&self) {
         let store_error = lock(&self.catchup).store_error();
         let output_error = lock(&self.output_error).clone();
         let where_ = where_of(&read(&self.ctx.config));
@@ -315,7 +351,11 @@ struct Upkeep {
 
 impl Upkeep {
     /// One beat: the catch-up's page timeout, the periodic catch-up and the retention sweep when due, then metrics and status.
+    /// Once shutdown has begun it does nothing: no pass, no sweep, no report.
     fn tick(&mut self, now: Instant) {
+        if self.report.is_closed() {
+            return;
+        }
         let (ctx, host) = (&self.report.ctx, &self.report.host);
         lock(&self.report.catchup).check_timeout(now);
         let (catch_up, retention_days, output_dir) = {
@@ -324,13 +364,13 @@ impl Upkeep {
         };
         if now >= self.next_catch_up {
             self.next_catch_up = now + CATCH_UP_EVERY;
-            if catch_up {
+            if catch_up && !self.report.is_closed() {
                 lock(&self.report.catchup).begin(Mode::Periodic, now_ms());
             }
         }
         if now >= self.next_retain {
             self.next_retain = now + RETAIN_EVERY;
-            if retention_days > 0 {
+            if retention_days > 0 && !self.report.is_closed() {
                 let root = output_dir.unwrap_or_else(|| ctx.capture_dir.clone());
                 let n = sweep(&root, Duration::from_secs(u64::from(retention_days) * DAY_S), SystemTime::now(), &|m| host.warn(m));
                 if n > 0 {
@@ -616,6 +656,33 @@ mod tests {
         upkeep(now - Duration::from_secs(1)).tick(now);
         assert!(old.exists() && fresh.exists(), "0 keeps everything");
         plugin.shutdown(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn after_shutdown_reports_last_nothing_more_is_sent_or_started() {
+        let dir = testing::temp_dir("plugin");
+        let (host, captured) = testing::capture();
+        let mut plugin = Dvcf::start(host, setup(&dir, Config { catch_up: true, retention_days: 7, ..Default::default() })).unwrap();
+        let old = dir.join("sys1/2026/10/20/old.dvcf");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, b"x").unwrap();
+        std::fs::File::options().write(true).open(&old).unwrap().set_modified(SystemTime::now() - Duration::from_secs(8 * 86_400)).unwrap();
+        let t0 = Instant::now();
+        plugin.shutdown(Duration::from_secs(1));
+        assert!(t0.elapsed() < Duration::from_millis(900), "took {:?} of a 1 s grace", t0.elapsed());
+        let out = captured.output();
+        let n = out.messages.len();
+        assert!(matches!(&out.messages[n - 2..], [PluginMessage::Metrics(_), PluginMessage::Status { .. }]), "shutdown's report is last: {:?}", out.messages);
+
+        // A tick that was under way when shutdown came, with a periodic pass and a sweep both due, and any other send.
+        let now = Instant::now();
+        let mut late = Upkeep { report: plugin.report.clone(), next_catch_up: now - Duration::from_secs(1), next_retain: now - Duration::from_secs(1) };
+        late.tick(now);
+        plugin.report.send();
+        plugin.report.send_status();
+        assert_eq!(captured.output().messages.len(), n, "nothing after the last report: {:?}", &captured.output().messages[n..]);
+        assert_eq!(calls_queries(&captured.output()), 1, "only the start pass asked for calls");
+        assert!(old.exists(), "no sweep once shutdown has begun");
     }
 
     #[test]
