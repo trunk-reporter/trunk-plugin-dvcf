@@ -253,8 +253,8 @@ this only removes what it doesn't.
   plugin still answers `failed` per call rather than exiting.
 - Metrics: queue depth, in flight, written (run total), skipped by reason, failed, catch-up queued
   and written, bytes written.
-- Shutdown: finish the job in hand, write nothing new, exit within the grace period; queued
-  catch-up jobs are dropped (the next pass finds them again). Queued live calls are **saved**,
+- Shutdown: finish the live or saved job in hand, write nothing new, exit within the grace period;
+  queued catch-up jobs are dropped and one in hand is not waited for (the next pass finds them again). Queued live calls are **saved**,
   not failed: their keys and frames-file paths go to `queue.jsonl` in the plugin's data folder,
   and the next start works them first, before the catch-up pass, dropping with a log line any
   whose frames file is gone. (A `failed` answer keeps the call's files only when the user has

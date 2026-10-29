@@ -215,9 +215,10 @@ impl Plugin for Dvcf {
                 let _ = thread.join();
             }
         }
-        // Half the grace for the queue to empty on its own; the queue's shutdown then takes at most 0.8 of what is left.
+        // Half the grace for the live and saved work to end on its own (catch-up work is not waited for: the next pass finds
+        // it again); the queue's shutdown then takes at most 0.8 of what is left.
         let idle_by = t0 + grace.mul_f64(0.5);
-        while !self.queue.is_empty() && Instant::now() < idle_by {
+        while self.queue.front_pending() > 0 && Instant::now() < idle_by {
             thread::sleep(Duration::from_millis(20));
         }
         let calls = self.queue.shutdown(remaining());
@@ -653,6 +654,33 @@ mod tests {
         assert!(blocker.is_file(), "call 1 written at the next start");
         let answered: Vec<_> = out.results().into_iter().map(|r| (r.0, r.1)).collect();
         assert_eq!(answered, [(calls[0].path.clone(), Outcome::Ok)], "a saved call is answered when it is worked");
+    }
+
+    #[test]
+    fn shutdown_does_not_wait_for_catch_up_work() {
+        let dir = testing::temp_dir("plugin");
+        let (host, _captured) = testing::capture();
+        let mut plugin = Dvcf::start(host.clone(), setup(&dir, Config { catch_up: false, ..Default::default() })).unwrap();
+        // A queue whose worker is stuck on a catch-up job, with more catch-up work waiting.
+        let (open, shut) = mpsc::channel::<()>();
+        let shut = Mutex::new(shut);
+        let busy = Arc::new(AtomicBool::new(false));
+        let b = busy.clone();
+        let queue = Arc::new(Queue::start(host, QueueOptions { retry_after: vec![] }, move |_| {
+            b.store(true, Ordering::Relaxed);
+            let _ = lock(&shut).recv();
+            crate::queue::Done::Ok { took: Duration::ZERO, bytes: 0 }
+        }));
+        for k in 1..=3 {
+            assert!(queue.push(testing::call(&dir, "sys1", 170 + k), Kind::CatchUp));
+        }
+        wait_for("the worker to be stuck", || busy.load(Ordering::Relaxed));
+        plugin.queue = queue;
+        let t0 = Instant::now();
+        plugin.shutdown(Duration::from_secs(1));
+        assert!(t0.elapsed() < Duration::from_millis(300), "took {:?} of a 1 s grace", t0.elapsed());
+        assert!(!dir.join("data").join(crate::saved::FILE).exists(), "catch-up work is not saved");
+        drop(open);
     }
 
     #[test]

@@ -123,6 +123,8 @@ struct Inner {
     flying: HashMap<String, Flight>,
     /// Counted from when the worker takes a job until its end is sent.
     in_flight: usize,
+    /// The part of `in_flight` that is live or saved work (a catch-up job a live call joins counts from then).
+    front_flight: usize,
     closing: bool,
     /// Live and saved jobs that asked for a retry once closing: shutdown hands them back.
     unfinished: Vec<ConcludedCall>,
@@ -172,6 +174,9 @@ impl Inner {
         }
         match self.flying.get_mut(path) {
             Some(flight) if flight.kind != Kind::Live && !flight.answered => {
+                if flight.kind == Kind::CatchUp {
+                    self.front_flight += 1;
+                }
                 flight.kind = Kind::Live;
                 true
             }
@@ -234,6 +239,9 @@ impl Shared {
             if let Some(job) = inner.take(now) {
                 inner.flying.insert(job.call.path.clone(), Flight { call: job.call.clone(), kind: job.kind, answered: false });
                 inner.in_flight += 1;
+                if job.kind != Kind::CatchUp {
+                    inner.front_flight += 1;
+                }
                 drop(inner);
                 self.run(job);
                 inner = self.lock();
@@ -258,6 +266,8 @@ impl Shared {
             }
             None => false,
         };
+        // Counted in `front_flight` since it was taken (or joined).
+        let front = job.kind != Kind::CatchUp;
         let end = match done {
             Done::Ok { took, bytes } => {
                 inner.ok(took, bytes, job.kind);
@@ -278,7 +288,7 @@ impl Shared {
                         inner.unfinished.push(job.call.clone());
                     }
                     inner.paths.remove(&job.call.path);
-                    return self.finish(inner);
+                    return self.finish(inner, front);
                 }
                 if tries < self.opts.retry_after.len() {
                     let message = format!("retry {}/{} for {}: {m}", tries + 1, self.opts.retry_after.len(), job.call.path);
@@ -286,6 +296,9 @@ impl Shared {
                     inner.stats.retries += 1;
                     inner.retrying.push((Instant::now() + self.opts.retry_after[tries], job));
                     inner.in_flight -= 1;
+                    if front {
+                        inner.front_flight -= 1;
+                    }
                     self.changed.notify_all();
                     drop(inner);
                     self.host.warn(message);
@@ -301,12 +314,15 @@ impl Shared {
             self.answer(&job.call.path, &end);
         }
         // Counted in flight until its end is sent, so an empty queue has sent everything.
-        self.finish(self.lock())
+        self.finish(self.lock(), front)
     }
 
-    /// The job in flight is over.
-    fn finish(&self, mut inner: MutexGuard<'_, Inner>) {
+    /// The job in flight is over; `front` when it was live or saved work.
+    fn finish(&self, mut inner: MutexGuard<'_, Inner>, front: bool) {
         inner.in_flight -= 1;
+        if front {
+            inner.front_flight -= 1;
+        }
         self.changed.notify_all();
     }
 
@@ -390,6 +406,12 @@ impl Queue {
         inner.catch_up.len() + inner.retrying.iter().filter(|(_, j)| j.kind == Kind::CatchUp).count()
     }
 
+    /// Live and saved work not yet ended: waiting, waiting for a retry, or in flight (until its end is sent).
+    pub fn front_pending(&self) -> usize {
+        let inner = self.shared.lock();
+        inner.front.len() + inner.retrying.iter().filter(|(_, j)| j.kind != Kind::CatchUp).count() + inner.front_flight
+    }
+
     /// Jobs queued and in flight.
     pub fn len(&self) -> usize {
         let inner = self.shared.lock();
@@ -402,10 +424,12 @@ impl Queue {
 
     /// Stops taking work and hands back the calls to save. Waiting catch-up
     /// jobs are dropped; waiting live and saved jobs (retries too) are taken
-    /// off the queue; the job in flight gets up to 0.8 × `grace` to finish. A
-    /// live or saved job still in flight then is handed back too, and its end,
-    /// should it come, sends nothing. No `call.result` goes for any of them.
-    /// Returns the calls in queue order, the one in flight last.
+    /// off the queue; a live or saved job in flight gets up to 0.8 × `grace`
+    /// to finish (a catch-up job in flight is not waited for: the next pass
+    /// finds its call again). A live or saved job still in flight then is
+    /// handed back too, and its end, should it come, sends nothing. No
+    /// `call.result` goes for any of them. Returns the calls in queue order,
+    /// the one in flight last.
     pub fn shutdown(&self, grace: Duration) -> Vec<ConcludedCall> {
         let s = &self.shared;
         let deadline = Instant::now() + grace.mul_f64(0.8);
@@ -423,7 +447,7 @@ impl Queue {
             jobs.into_iter().filter(|j| j.kind != Kind::CatchUp).map(|j| j.call).collect()
         };
         let mut inner = s.lock();
-        while inner.in_flight > 0 {
+        while inner.front_flight > 0 {
             let now = Instant::now();
             if now >= deadline {
                 break;
@@ -680,6 +704,40 @@ mod tests {
         drop(open);
         wait_for("the catch-up job to end", || q.is_empty());
         assert_eq!(out.output().results(), want, "its late end sends nothing more");
+    }
+
+    #[test]
+    fn front_pending_counts_live_and_saved_work_only() {
+        let (host, _out) = testing::capture();
+        let (q, started, open) = blocking(host);
+        let dir = testing::temp_dir("queue-front-pending");
+        let c = call(&dir, 1);
+        assert!(q.push(c.clone(), Kind::CatchUp));
+        wait_for("the catch-up job to start", || !started.lock().unwrap().is_empty());
+        assert!(q.push(call(&dir, 2), Kind::CatchUp));
+        assert_eq!((q.front_pending(), q.len()), (0, 2), "catch-up work, waiting or in flight, is not counted");
+        assert!(q.push(call(&dir, 3), Kind::Live));
+        assert!(q.push(call(&dir, 4), Kind::Saved));
+        assert_eq!(q.front_pending(), 2);
+        assert!(q.push(c, Kind::Live), "joins the catch-up job in flight");
+        assert_eq!(q.front_pending(), 3, "which now counts");
+        drop(open);
+        wait_for("all done", || q.is_empty());
+        assert_eq!(q.front_pending(), 0);
+    }
+
+    #[test]
+    fn shutdown_does_not_wait_for_a_catch_up_job_in_flight() {
+        let (host, out) = testing::capture();
+        let (q, started, _open) = blocking(host);
+        let dir = testing::temp_dir("queue-shutdown-catch-up");
+        assert!(q.push(call(&dir, 1), Kind::CatchUp));
+        wait_for("the catch-up job to start", || !started.lock().unwrap().is_empty());
+        assert!(q.push(call(&dir, 2), Kind::CatchUp));
+        let t = Instant::now();
+        assert!(q.shutdown(Duration::from_secs(1)).is_empty());
+        assert!(t.elapsed() < Duration::from_millis(200), "took {:?}", t.elapsed());
+        assert!(out.output().results().is_empty());
     }
 
     #[test]
