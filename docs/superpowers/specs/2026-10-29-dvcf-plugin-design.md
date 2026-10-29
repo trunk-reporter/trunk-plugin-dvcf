@@ -256,8 +256,9 @@ this only removes what it doesn't.
   and the next start works them first, before the catch-up pass, dropping with a log line any
   whose frames file is gone. (A `failed` answer keeps the call's files only when the user has
   **Keep when a plugin fails** on; otherwise the frames file would go with the audio and the
-  call could never be converted. Saving loses nothing. No `call.result` is sent for a saved
-  call: the recorder drops its pending entry at its own restart.)
+  call could never be converted. Saving loses nothing. A saved call is answered with its `call.result` when it is worked
+  after the restart: the recorder keeps the pending entry across a plugin-only restart and
+  ignores a result for a call it no longer knows.)
 
 ### Testing
 
@@ -294,6 +295,7 @@ which must have been recorded with `captureFrames` on.
 - The queue is the plugin's own, grown from the transcribe plugin's, because the SDK's answers
   the recorder for every item and can't keep catch-up jobs silent or put live calls first.
 - Queued live calls are saved across a restart rather than failed, so a frames file is never
-  lost to a shutdown.
+  lost to a shutdown; each is answered with its `call.result` when it is worked after the
+  restart (the recorder ignores a result for a call it no longer knows).
 - The frames file is looked for beside the call's JSON first (the RAM spool case), then under
   the capture folder.

@@ -83,9 +83,10 @@ IMBE has eight params, as before.
 
 ## Restart
 
-When the recorder stops, live calls still waiting (and one being converted) are saved to `plugin-data/dvcf/queue.jsonl`.
-The next start works them first, before the catch-up, and logs and drops any whose frames file is gone. Waiting catch-up
-work is not saved: the next pass finds it again.
+When the recorder stops, or the plugin is restarted, live calls still waiting (or one still being converted when the
+grace period runs out) are saved to `plugin-data/dvcf/queue.jsonl`. The next start works them first, before the
+catch-up, and answers each with its result as it is worked; it logs and drops any whose frames file is gone. Waiting
+catch-up work is not saved: the next pass finds it again.
 
 ## Status
 

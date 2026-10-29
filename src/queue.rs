@@ -2,9 +2,11 @@
 //!
 //! Live calls and the calls saved at the last shutdown go first (oldest
 //! first), then retries that are due, then catch-up work, on one worker, so
-//! the recorder's calls never wait behind a catch-up. Every live job ends in
-//! exactly one `call.result`; saved and catch-up jobs send none, unless a live
-//! call for the same path joins them, which makes them live. At shutdown the
+//! the recorder's calls never wait behind a catch-up. Every live and saved job
+//! ends in exactly one `call.result` (a saved call's is for the recorder's
+//! pending entry, kept across a plugin-only restart; one it no longer knows it
+//! ignores); catch-up jobs send none, unless a live call for the same path
+//! joins them, which makes them live. At shutdown the
 //! live and saved calls not yet written are handed back, to be saved for the
 //! next start; catch-up work is dropped, as the next catch-up finds it again.
 
@@ -21,7 +23,7 @@ use trunk_recorder_plugin::{ConcludedCall, Host, Outcome};
 pub enum Kind {
     /// A `call.concluded`: answered with a `call.result`.
     Live,
-    /// A call saved at the last shutdown, before it was written.
+    /// A call saved at the last shutdown, before it was written: answered with a `call.result` too.
     Saved,
     /// A past call the catch-up found with frames and no .dvcf.
     CatchUp,
@@ -295,7 +297,7 @@ impl Shared {
         };
         inner.paths.remove(&job.call.path);
         drop(inner);
-        if job.kind == Kind::Live && !answered {
+        if job.kind != Kind::CatchUp && !answered {
             self.answer(&job.call.path, &end);
         }
         // Counted in flight until its end is sent, so an empty queue has sent everything.
@@ -308,7 +310,7 @@ impl Shared {
         self.changed.notify_all();
     }
 
-    /// Tells the recorder of a live job's end. Called with no lock held.
+    /// Tells the recorder of a live or saved job's end. Called with no lock held.
     fn answer(&self, path: &str, end: &End) {
         match end {
             End::Ok(took) => self.host.call_result_took(path, Outcome::Ok, "", "", *took),
@@ -510,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn results_go_back_for_live_only() {
+    fn results_go_back_for_live_and_saved_jobs_not_catch_up() {
         let (host, out) = testing::capture();
         let worked = Arc::new(Mutex::new(Vec::<u32>::new()));
         let w = worked.clone();
@@ -533,7 +535,8 @@ mod tests {
         wait_for("all five done", || worked.lock().unwrap().len() == 5 && q.is_empty());
 
         let o = out.output();
-        assert_eq!(o.results(), vec![result(&p[0], Outcome::Ok, ""), result(&p[1], Outcome::Skipped, "analog"), result(&p[2], Outcome::Failed, "no frames")]);
+        let want = vec![result(&p[0], Outcome::Ok, ""), result(&p[1], Outcome::Skipped, "analog"), result(&p[2], Outcome::Failed, "no frames"), result(&p[4], Outcome::Ok, "")];
+        assert_eq!(o.results(), want, "the catch-up job (call 4) sends nothing; the saved one (call 5) is answered");
         let took = o.messages.iter().find_map(|m| match m {
             PluginMessage::CallResult { path, took_ms, .. } if *path == p[0] => Some(*took_ms),
             _ => None,
@@ -576,7 +579,9 @@ mod tests {
         let (host, out) = testing::capture();
         let (q, started, open) = blocking(host);
         let dir = testing::temp_dir("queue-dup");
-        assert!(q.push(call(&dir, 10), Kind::Saved));
+        let saved = call(&dir, 10);
+        let ps = saved.path.clone();
+        assert!(q.push(saved, Kind::Saved));
         wait_for("the worker to be busy", || !started.lock().unwrap().is_empty());
         let c = call(&dir, 1);
         let pc = c.path.clone();
@@ -595,7 +600,7 @@ mod tests {
         wait_for("all three done", || started.lock().unwrap().len() == 3 && q.is_empty());
 
         assert_eq!(*started.lock().unwrap(), vec![(Kind::Saved, 10), (Kind::Live, 1), (Kind::Live, 2)], "each worked once");
-        assert_eq!(out.output().results(), vec![result(&pc, Outcome::Ok, ""), result(&pd, Outcome::Ok, "")]);
+        assert_eq!(out.output().results(), vec![result(&ps, Outcome::Ok, ""), result(&pc, Outcome::Ok, ""), result(&pd, Outcome::Ok, "")]);
     }
 
     #[test]

@@ -581,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_saves_the_queue_and_the_next_start_works_it_silently() {
+    fn shutdown_saves_the_queue_and_the_next_start_works_and_answers_it() {
         let dir = testing::temp_dir("plugin");
         let calls: Vec<ConcludedCall> = (1..=3).map(|k| fixtures::sdr_call(&dir, SdrMode::P25Fdma, 150 + k, 4).0).collect();
         // A folder where call 1's file should go: its write fails and it waits for a retry (1 s).
@@ -611,7 +611,8 @@ mod tests {
         assert!(out.ready());
         assert!(!dir.join("data").join(crate::saved::FILE).exists(), "taken once");
         assert!(blocker.is_file(), "call 1 written at the next start");
-        assert!(out.results().is_empty(), "a saved call sends no call.result: {:?}", out.results());
+        let answered: Vec<_> = out.results().into_iter().map(|r| (r.0, r.1)).collect();
+        assert_eq!(answered, [(calls[0].path.clone(), Outcome::Ok)], "a saved call is answered when it is worked");
     }
 
     #[test]
