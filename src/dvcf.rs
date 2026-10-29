@@ -4,6 +4,8 @@
 //! CODEC_FRAME per vocoder frame, one CALL_METADATA carrying the whole call record as JSON, and one CALL_END, in the layouts of
 //! tr-plugin-dvcf's `DVCF_SPEC.md`, so the classic trunk-recorder plugin's readers read ours too.
 
+use serde::Serialize;
+use serde_json::value::RawValue;
 use serde_json::{Map, Value, json};
 use trunk_core::mbe::Kind;
 use trunk_core::p25::voice::imbe_bits_to_params;
@@ -163,8 +165,8 @@ pub fn build(record: &CallRecord, frames: &[VoiceFrame], p: Provenance) -> Resul
         w.message(CODEC_FRAME, &b);
     }
 
-    let json = serde_json::to_vec(&metadata(record, p)).map_err(|e| format!("metadata: {e}"))?;
-    w.message(CALL_METADATA, &json);
+    let json = metadata(record, p)?;
+    w.message(CALL_METADATA, json.as_bytes());
 
     let mut b = Vec::new();
     put_u32(&mut b, tg);
@@ -180,9 +182,20 @@ pub fn build(record: &CallRecord, frames: &[VoiceFrame], p: Provenance) -> Resul
     Ok(Built { bytes: w.bytes, frames: frames.len(), warnings })
 }
 
-/// CALL_METADATA's JSON object for a call: the C++ plugin's columns first (the talkgroup's strings only when set), then the whole
-/// record as `trunk_recorder_call` and where the file came from as `trunk_recorder_pro`.
-pub fn metadata(record: &CallRecord, p: Provenance) -> Value {
+/// CALL_METADATA's object: the columns in their order, then the record's own JSON text, then the provenance.
+#[derive(Serialize)]
+struct Metadata {
+    #[serde(flatten)]
+    columns: Map<String, Value>,
+    trunk_recorder_call: Box<RawValue>,
+    trunk_recorder_pro: Value,
+}
+
+/// CALL_METADATA's JSON text for a call: the C++ plugin's columns first (the talkgroup's strings only when set), then the whole
+/// record as `trunk_recorder_call`, embedded as the `.json` file's text byte for byte (its key order and number formats, not a
+/// re-parse of it), and where the file came from as `trunk_recorder_pro`.
+pub fn metadata(record: &CallRecord, p: Provenance) -> Result<String, String> {
+    let fail = |e: serde_json::Error| format!("metadata: {e}");
     let mut m = Map::new();
     for (key, value) in [
         ("tg_tag", &record.talkgroup_group_tag),
@@ -212,9 +225,13 @@ pub fn metadata(record: &CallRecord, p: Provenance) -> Value {
             .map(|s| json!({ "src": s.src, "time": s.time, "pos": s.pos, "emergency": u8::from(s.emergency), "signal_system": s.signal_system, "tag": s.tag }));
         m.insert("src_list".into(), Value::Array(list.collect()));
     }
-    m.insert("trunk_recorder_call".into(), serde_json::from_str(&record.to_json()).unwrap_or(Value::Null));
-    m.insert("trunk_recorder_pro".into(), json!({ "version": p.host_version, "plugin": format!("dvcf {}", p.plugin_version), "frames_file": p.source.name() }));
-    Value::Object(m)
+    // A record that would not serialise (`to_json` gives "" then) is null, as before.
+    let call = match RawValue::from_string(record.to_json()) {
+        Ok(call) => call,
+        Err(_) => serde_json::value::to_raw_value(&Value::Null).map_err(fail)?,
+    };
+    let pro = json!({ "version": p.host_version, "plugin": format!("dvcf {}", p.plugin_version), "frames_file": p.source.name() });
+    serde_json::to_string(&Metadata { columns: m, trunk_recorder_call: call, trunk_recorder_pro: pro }).map_err(fail)
 }
 
 /// A reader for the tests: a `.dvcf` file's bytes back as messages.
@@ -387,7 +404,9 @@ mod tests {
         r.patched_talkgroups = vec![9171];
         r.src_list = vec![SrcEntry { src: 1234567, time: 1711234567, pos: 0.0, emergency: true, tag: "Engine 5".into(), ..Default::default() }];
         r.freq_list = vec![FreqEntry { freq: 855_737_500, spike_count: 2, ..Default::default() }];
-        let m = metadata(&r, p());
+        let text = metadata(&r, p()).unwrap();
+        assert!(text.contains(&format!("\"trunk_recorder_call\":{}", r.to_json())), "the record's own text, byte for byte: {text}");
+        let m: Value = serde_json::from_str(&text).unwrap();
         let keys: Vec<&String> = m.as_object().unwrap().keys().collect();
         assert_eq!(
             keys,
@@ -418,7 +437,7 @@ mod tests {
         assert_eq!(m["trunk_recorder_call"], serde_json::from_str::<Value>(&r.to_json()).unwrap());
         assert_eq!(m["trunk_recorder_pro"], json!({ "version": "0.3.0", "plugin": "dvcf 0.1.0", "frames_file": "sdr" }));
         // Nothing set: the strings and lists are left out, the levels are null.
-        let bare = metadata(&CallRecord::default(), p());
+        let bare: Value = serde_json::from_str(&metadata(&CallRecord::default(), p()).unwrap()).unwrap();
         assert!(bare.get("tg_tag").is_none() && bare.get("patched_tgs").is_none() && bare.get("src_list").is_none());
         assert_eq!(bare["signal"], Value::Null);
     }
