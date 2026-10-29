@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     /// Output folder
     ///
-    /// Where the .dvcf files go. Empty: beside each call in the capture folder. Otherwise this folder, with the calls' own system/date layout under it.
+    /// Where the .dvcf files go. Empty: in the capture folder, next to each call's other files. Otherwise this folder, with the calls' own system/date layout under it.
     pub output_dir: String,
     /// Keep for (days)
     ///
@@ -42,7 +42,7 @@ impl Config {
         Ok(())
     }
 
-    /// The output folder, or `None` when the .dvcf files go beside their calls.
+    /// The output folder, or `None` when the .dvcf files go under the capture folder.
     pub fn output_dir(&self) -> Option<PathBuf> {
         (!self.output_dir.is_empty()).then(|| PathBuf::from(&self.output_dir))
     }

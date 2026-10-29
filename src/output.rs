@@ -3,12 +3,11 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-/// Where a call's .dvcf goes: beside its JSON when there is no output folder, otherwise under the folder at the call's own `system/Y/M/D/base` key.
-pub fn target(output_dir: Option<&Path>, json: &Path, path: &str) -> PathBuf {
-    match output_dir {
-        None => json.with_extension("dvcf"),
-        Some(dir) => dir.join(format!("{path}.dvcf")),
-    }
+/// Where a call's .dvcf goes: at the call's own `system/Y/M/D/base` key under the output folder, or under the capture folder when
+/// there is none. Never beside a JSON held elsewhere (the recorder's RAM spool): the recorder moves only its own files out of the
+/// spool, so a .dvcf left there would be lost; under the capture folder it sits beside the call's other files once they are settled.
+pub fn target(output_dir: Option<&Path>, capture_dir: &Path, path: &str) -> PathBuf {
+    output_dir.unwrap_or(capture_dir).join(format!("{path}.dvcf"))
 }
 
 /// Writes `bytes` to `target` whole or not at all: into `<target>.tmp` first, then renamed over the target. A failure leaves no `.tmp` behind.
@@ -65,15 +64,13 @@ mod tests {
     use trunk_recorder_plugin::testing;
 
     #[test]
-    fn the_target_is_beside_the_json_or_under_the_output_folder() {
-        let json = Path::new("cap").join("sys1").join("2026").join("10").join("29").join("9170-1761700000_851012500.0-call_3.json");
-        assert_eq!(target(None, &json, "sys1/2026/10/29/9170-1761700000_851012500.0-call_3"), json.with_extension("dvcf"));
-        assert!(target(None, &json, "x").to_string_lossy().ends_with("call_3.dvcf"), "the dot in the base name survives");
+    fn the_target_is_under_the_capture_folder_or_the_output_folder_at_the_calls_key() {
+        let key = "sys1/2026/10/29/9170-1761700000_851012500.0-call_3";
+        let cap = Path::new("cap");
+        assert_eq!(target(None, cap, key), cap.join("sys1/2026/10/29/9170-1761700000_851012500.0-call_3.dvcf"));
+        assert!(target(None, cap, key).to_string_lossy().ends_with("call_3.dvcf"), "the dot in the base name survives");
         let out = Path::new("out");
-        assert_eq!(
-            target(Some(out), &json, "sys1/2026/10/29/9170-1761700000_851012500.0-call_3"),
-            out.join("sys1/2026/10/29/9170-1761700000_851012500.0-call_3.dvcf")
-        );
+        assert_eq!(target(Some(out), cap, key), out.join("sys1/2026/10/29/9170-1761700000_851012500.0-call_3.dvcf"));
     }
 
     #[test]

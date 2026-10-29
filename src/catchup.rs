@@ -180,7 +180,7 @@ impl CatchUp {
                 tally.skipped += 1;
                 continue;
             }
-            if target(output_dir.as_deref(), &call.files.json, &call.path).exists() {
+            if target(output_dir.as_deref(), &self.ctx.capture_dir, &call.path).exists() {
                 tally.settled += 1;
                 continue;
             }

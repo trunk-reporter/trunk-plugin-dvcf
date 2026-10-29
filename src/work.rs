@@ -90,7 +90,7 @@ pub fn process(ctx: &Ctx, job: &Job, warn: &dyn Fn(String)) -> Done {
         return Done::Skipped(reason);
     }
     let output_dir = read_lock(&ctx.config).output_dir();
-    let target = target(output_dir.as_deref(), &call.files.json, &call.path);
+    let target = target(output_dir.as_deref(), &ctx.capture_dir, &call.path);
     if job.kind == Kind::CatchUp && target.exists() {
         return Done::Skipped("already written".into());
     }
@@ -182,6 +182,27 @@ mod tests {
         std::fs::write(&f, b"old").unwrap();
         assert_eq!(process(&ctx, &job(call.clone(), Kind::CatchUp), &|_| {}), Done::Skipped("already written".into()));
         assert_eq!(std::fs::read(&f).unwrap(), b"old");
+    }
+
+    #[test]
+    fn a_spooled_call_is_written_under_the_capture_folder_not_in_the_spool() {
+        let dir = testing::temp_dir("work");
+        let spool = testing::temp_dir("spool");
+        let ctx = ctx_for(&dir, vec![]);
+        let (mut call, _) = fixtures::sdr_call(&dir, SdrMode::P25Fdma, 36, 5);
+        // The call held in the recorder's RAM spool: its JSON and frames file are there, nothing under the capture folder yet.
+        let json = spool.join("held.json");
+        std::fs::copy(&call.files.json, &json).unwrap();
+        std::fs::copy(call.files.json.with_extension("sdr"), spool.join("held.sdr")).unwrap();
+        std::fs::remove_file(call.files.json.with_extension("sdr")).unwrap();
+        std::fs::remove_file(&call.files.json).unwrap();
+        call.files.json = json;
+        let done = process(&ctx, &job(call.clone(), Kind::Live), &|m| panic!("{m}"));
+        assert!(matches!(done, Done::Ok { .. }), "{done:?}");
+        assert!(dir.join(format!("{}.dvcf", call.path)).is_file(), "at the call's key under the capture folder");
+        let mut left: Vec<String> = std::fs::read_dir(&spool).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        assert_eq!(left, ["held.json", "held.sdr"], "nothing written in the spool");
     }
 
     #[test]

@@ -31,7 +31,7 @@ All four apply while the recorder runs. [`examples/settings.json`](examples/sett
 
 | Key | Default | |
 | --- | --- | --- |
-| `outputDir` | empty | Where the files go. Empty: beside each call in the capture folder. Otherwise an absolute folder path. |
+| `outputDir` | empty | Where the files go. Empty: in the capture folder, next to each call's other files. Otherwise an absolute folder path. |
 | `retentionDays` | `0` | Delete `.dvcf` files older than this many days. 0 keeps them for ever. |
 | `catchUp` | `true` | Convert past calls that still have a frames file and no `.dvcf`: at start, then every 10 minutes. |
 | `catchUpDays` | `30` | How far back the catch-up looks. 0: as far as the recorder's call store goes. |
@@ -40,7 +40,8 @@ A relative `outputDir` is refused, and the card says so until good settings come
 
 ## Where the files go
 
-Empty `outputDir`: `<base>.dvcf` sits beside the call's other files. With `outputDir` set, the call's own layout is
+Empty `outputDir`: `<base>.dvcf` goes in the capture folder, next to the call's other files. (A call the recorder holds
+in its RAM spool has its other files moved there when it is settled.) With `outputDir` set, the call's own layout is
 mirrored under it: `<outputDir>/<system>/<Y>/<M>/<D>/<base>.dvcf`. Pair a `.dvcf` with the call's audio by base name.
 
 A file is written to `<base>.dvcf.tmp` and renamed, so a reader sees it whole or not at all. A call that concludes

@@ -56,7 +56,10 @@ analog. The file is not listed in `call.concluded`'s `files`; the plugin finds i
 JSON file (`files.json` with its extension swapped for `.sdr` or `.frames.jsonl`), falling back
 to `<capture_dir>/<path>.sdr` / `.frames.jsonl`, `path` being the call's key. The first form
 matters when the recorder's RAM spool is on: a held call's files, frames included, sit in the
-spool beside its JSON, not yet under the capture folder.
+spool beside its JSON, not yet under the capture folder. The `.dvcf` itself never goes in the
+spool: TRP's `settle` moves only its own files (wav, sdr, frames.jsonl, m4a, json) out of it, so
+with `outputDir` empty the file is written under the capture folder at the call's key
+(`<capture_dir>/<path>.dvcf`, which is beside the call's other files once it is settled).
 TRP keeps a call's files until every plugin that takes concluded calls has reported on it, so the
 frames file is there when the plugin runs.
 
@@ -126,7 +129,7 @@ Few, all live (`live_settings`), drawn on the plugin's card:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `outputDir` | `""` | Where files go. Empty: beside the call, in TRP's capture folder (the spec's sidecar rule). Otherwise a folder, under which the call's own relative layout is mirrored (`<short_name>/<Y>/<M>/<D>/<base>.dvcf`). |
+| `outputDir` | `""` | Where files go. Empty: under the capture folder at the call's key (`<capture_dir>/<path>.dvcf`, which is beside the call's other files once it is settled; the spec's sidecar rule). Otherwise a folder, under which the call's own relative layout is mirrored (`<short_name>/<Y>/<M>/<D>/<base>.dvcf`). |
 | `retentionDays` | `0` | Delete `.dvcf` files older than this many days; 0 keeps everything. Only `.dvcf` files the plugin's layout accounts for are touched, nothing else in the capture folder. |
 | `catchUp` | `true` | Convert past calls that still have a frames file and no `.dvcf`: at start, then every 10 minutes. |
 | `catchUpDays` | `30` | How far back the catch-up looks (0: as far as the call store goes). |
