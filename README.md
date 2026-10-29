@@ -56,8 +56,7 @@ With `catchUp` on, the plugin asks the recorder's call store for calls from the 
 and converts each one that still has a frames file and no `.dvcf`. At start it walks the whole window; the passes every 10
 minutes stop at the first page with nothing left to do. Live calls always go ahead of catch-up work. The catch-up **never
 overwrites** a `.dvcf` that is there. If a pass finds more than 2000 calls to convert, it pauses and the next pass goes on.
-The log says how many were queued at the end of each pass. If the call store is off, the plugin warns once and the card
-shows it.
+The log says how many were queued at the end of each pass. If the call store is off, the plugin warns in the log at each pass that finds it off, and the card shows a warning until a pass ends cleanly.
 
 A call's frames file only lasts as long as Trunk Recorder Pro keeps the call, so catch-up can only reach calls still on disk.
 
