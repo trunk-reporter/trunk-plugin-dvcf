@@ -657,30 +657,31 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_does_not_wait_for_catch_up_work() {
+    fn shutdown_does_not_spend_its_grace_on_a_catch_up_backlog() {
         let dir = testing::temp_dir("plugin");
-        let (host, _captured) = testing::capture();
+        let (host, captured) = testing::capture();
         let mut plugin = Dvcf::start(host.clone(), setup(&dir, Config { catch_up: false, ..Default::default() })).unwrap();
-        // A queue whose worker is stuck on a catch-up job, with more catch-up work waiting.
-        let (open, shut) = mpsc::channel::<()>();
-        let shut = Mutex::new(shut);
-        let busy = Arc::new(AtomicBool::new(false));
-        let b = busy.clone();
+        // A free worker that takes ~100 ms a job, and a backlog of catch-up work.
+        let seen = Arc::new(Mutex::new(0usize));
+        let s = seen.clone();
         let queue = Arc::new(Queue::start(host, QueueOptions { retry_after: vec![] }, move |_| {
-            b.store(true, Ordering::Relaxed);
-            let _ = lock(&shut).recv();
+            *lock(&s) += 1;
+            thread::sleep(Duration::from_millis(100));
             crate::queue::Done::Ok { took: Duration::ZERO, bytes: 0 }
         }));
-        for k in 1..=3 {
+        for k in 1..=20 {
             assert!(queue.push(testing::call(&dir, "sys1", 170 + k), Kind::CatchUp));
         }
-        wait_for("the worker to be stuck", || busy.load(Ordering::Relaxed));
+        wait_for("the first job to start", || *lock(&seen) > 0);
         plugin.queue = queue;
         let t0 = Instant::now();
-        plugin.shutdown(Duration::from_secs(1));
-        assert!(t0.elapsed() < Duration::from_millis(300), "took {:?} of a 1 s grace", t0.elapsed());
-        assert!(!dir.join("data").join(crate::saved::FILE).exists(), "catch-up work is not saved");
-        drop(open);
+        plugin.shutdown(Duration::from_secs(2));
+        let took = t0.elapsed();
+        // Waiting for the queue to empty, the old loop would have worked ~10 of them in its 1 s.
+        assert!(*lock(&seen) <= 2, "{} jobs worked: the one in flight, at most one more", *lock(&seen));
+        assert!(took < Duration::from_millis(600), "took {took:?} of a 2 s grace");
+        assert!(!dir.join("data").join(crate::saved::FILE).exists(), "no catch-up call is saved");
+        assert!(!captured.output().logs().iter().any(|(_, m)| m.contains("saved for the next start")), "{:?}", captured.output().logs());
     }
 
     #[test]

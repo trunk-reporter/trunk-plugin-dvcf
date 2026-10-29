@@ -424,12 +424,10 @@ impl Queue {
 
     /// Stops taking work and hands back the calls to save. Waiting catch-up
     /// jobs are dropped; waiting live and saved jobs (retries too) are taken
-    /// off the queue; a live or saved job in flight gets up to 0.8 × `grace`
-    /// to finish (a catch-up job in flight is not waited for: the next pass
-    /// finds its call again). A live or saved job still in flight then is
-    /// handed back too, and its end, should it come, sends nothing. No
-    /// `call.result` goes for any of them. Returns the calls in queue order,
-    /// the one in flight last.
+    /// off the queue; the job in flight gets up to 0.8 × `grace` to finish. A
+    /// live or saved job still in flight then is handed back too, and its end,
+    /// should it come, sends nothing. No `call.result` goes for any of them.
+    /// Returns the calls in queue order, the one in flight last.
     pub fn shutdown(&self, grace: Duration) -> Vec<ConcludedCall> {
         let s = &self.shared;
         let deadline = Instant::now() + grace.mul_f64(0.8);
@@ -447,7 +445,7 @@ impl Queue {
             jobs.into_iter().filter(|j| j.kind != Kind::CatchUp).map(|j| j.call).collect()
         };
         let mut inner = s.lock();
-        while inner.front_flight > 0 {
+        while inner.in_flight > 0 {
             let now = Instant::now();
             if now >= deadline {
                 break;
@@ -729,20 +727,6 @@ mod tests {
         drop(open);
         wait_for("all done", || q.is_empty());
         assert_eq!(q.front_pending(), 0);
-    }
-
-    #[test]
-    fn shutdown_does_not_wait_for_a_catch_up_job_in_flight() {
-        let (host, out) = testing::capture();
-        let (q, started, _open) = blocking(host);
-        let dir = testing::temp_dir("queue-shutdown-catch-up");
-        assert!(q.push(call(&dir, 1), Kind::CatchUp));
-        wait_for("the catch-up job to start", || !started.lock().unwrap().is_empty());
-        assert!(q.push(call(&dir, 2), Kind::CatchUp));
-        let t = Instant::now();
-        assert!(q.shutdown(Duration::from_secs(1)).is_empty());
-        assert!(t.elapsed() < Duration::from_millis(200), "took {:?}", t.elapsed());
-        assert!(out.output().results().is_empty());
     }
 
     #[test]
