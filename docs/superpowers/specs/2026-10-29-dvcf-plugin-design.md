@@ -248,8 +248,9 @@ this only removes what it doesn't.
 ### Status, metrics, shutdown
 
 - Status: ok normally; warning while calls arrive with no frames file, or the store is off during
-  catch-up; error only when the output folder can't be written (then the plugin still answers
-  `failed` per call rather than exiting).
+  catch-up; error only when the settings are refused, the output folder can't be made (tried again
+  with every accepted settings), or the last write failed (until the next one works); then the
+  plugin still answers `failed` per call rather than exiting.
 - Metrics: queue depth, in flight, written (run total), skipped by reason, failed, catch-up queued
   and written, bytes written.
 - Shutdown: finish the job in hand, write nothing new, exit within the grace period; queued

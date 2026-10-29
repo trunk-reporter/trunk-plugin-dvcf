@@ -95,8 +95,9 @@ catch-up work is not saved: the next pass finds it again.
 ## Status
 
 **Ok** says where the files go. **Warning** while calls arrive with no frames file (see the top), or the call store
-answers an error during catch-up. **Error** when the settings are refused or the output folder cannot be made; calls then
-fail one by one, and the recorder keeps their files only if **Keep when a plugin fails** is on.
+answers an error during catch-up. **Error** when the settings are refused, the output folder cannot be made (good settings
+sent again clear it once it can be), or the last write failed (until a file is written again); calls then fail one by
+one, and the recorder keeps their files only if **Keep when a plugin fails** is on.
 
 ## Building
 

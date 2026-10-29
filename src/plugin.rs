@@ -100,6 +100,7 @@ impl Plugin for Dvcf {
             capture_dir: setup.capture_dir.clone(),
             host_version: setup.host.version.clone(),
             skipped: Arc::default(),
+            write_error: Arc::default(),
         };
         let queue = {
             let (work_ctx, work_host) = (ctx.clone(), host.clone());
@@ -186,10 +187,8 @@ impl Plugin for Dvcf {
             *lock(&self.report.refused) = Some(format!("new settings not taken: {e}"));
             return Err(e);
         }
-        let moved = read(&self.ctx.config).output_dir != setup.config.output_dir;
-        if moved {
-            *lock(&self.report.output_error) = make_output_dir(&setup.config);
-        }
+        // Tried with every accepted settings, not only a changed folder, so the error clears once the folder can be made.
+        *lock(&self.report.output_error) = make_output_dir(&setup.config);
         *write(&self.ctx.systems) = systems_of(&setup);
         *write(&self.ctx.config) = setup.config;
         *lock(&self.report.refused) = None;
@@ -292,11 +291,12 @@ impl Report {
     fn status_now(&self) {
         let store_error = lock(&self.catchup).store_error();
         let output_error = lock(&self.output_error).clone();
+        let write_error = lock(&self.ctx.write_error).clone();
         let where_ = where_of(&read(&self.ctx.config));
         let no_frames = self.no_frames.load(Ordering::Relaxed);
         // Held while sending (nothing the host does takes it), so a refusal recorded by `settings` is never overwritten by a stale Ok.
         let refused = lock(&self.refused);
-        let (state, message) = status_of(refused.as_deref(), output_error.as_deref(), no_frames, store_error.as_deref(), &where_);
+        let (state, message) = status_of(refused.as_deref(), output_error.as_deref(), write_error.as_deref(), no_frames, store_error.as_deref(), &where_);
         self.host.status(state, message);
     }
 }
@@ -326,12 +326,22 @@ fn metrics_of(snap: &Snapshot, ctx: &Ctx, catch_up_queued: u64) -> Metrics {
     }
 }
 
-/// The status, first rule first: refused settings and an output folder that cannot be made are errors; calls with no frames
-/// file and a call store that answered an error are warnings; else ok, saying where the files go.
-fn status_of(refused: Option<&str>, output_error: Option<&str>, no_frames: bool, store_error: Option<&str>, where_: &str) -> (State, String) {
+/// The status, first rule first: refused settings, an output folder that cannot be made and a write that failed (until the next
+/// one that works) are errors; calls with no frames file and a call store that answered an error are warnings; else ok, saying
+/// where the files go.
+fn status_of(
+    refused: Option<&str>,
+    output_error: Option<&str>,
+    write_error: Option<&str>,
+    no_frames: bool,
+    store_error: Option<&str>,
+    where_: &str,
+) -> (State, String) {
     if let Some(m) = refused {
         (State::Error, m.to_string())
     } else if let Some(m) = output_error {
+        (State::Error, m.to_string())
+    } else if let Some(m) = write_error {
         (State::Error, m.to_string())
     } else if no_frames {
         (State::Warning, NO_FRAMES.to_string())
@@ -575,6 +585,25 @@ mod tests {
         assert!(target.join(format!("{}.dvcf", c.path)).is_file(), "written under the new output folder");
         assert!(!c.files.json.with_extension("dvcf").exists(), "not beside the call");
         assert_eq!(out.status(), Some((State::Error, "new settings not taken: Output folder: must be an absolute path".to_string())));
+
+        // Settings naming a folder that cannot be made yet: an error, cleared by the same settings once it can be made.
+        let file = dir.join("not-yet-a-folder");
+        std::fs::write(&file, b"x").unwrap();
+        let later = file.join("dvcf");
+        let (host, captured) = testing::capture();
+        let mut plugin = Dvcf::start(host, setup(&dir, Config { catch_up: false, ..Default::default() })).unwrap();
+        let same = || setup(&dir, Config { catch_up: false, output_dir: later.to_string_lossy().into_owned(), ..Default::default() });
+        plugin.settings(same()).unwrap();
+        plugin.report.send_status();
+        let (state, message) = captured.output().status().expect("a status");
+        assert_eq!(state, State::Error);
+        assert!(message.starts_with("cannot create the output folder "), "{message}");
+        std::fs::remove_file(&file).unwrap();
+        plugin.settings(same()).unwrap();
+        plugin.report.send_status();
+        assert_eq!(captured.output().status(), Some((State::Ok, format!("writing to {}", later.display()))));
+        assert!(later.is_dir());
+        plugin.shutdown(Duration::from_secs(1));
     }
 
     #[test]
@@ -699,11 +728,12 @@ mod tests {
     #[test]
     fn the_status_rules_in_order() {
         let place = "writing beside the calls";
-        assert_eq!(status_of(None, None, false, None, place), (State::Ok, place.to_string()));
-        assert_eq!(status_of(None, None, false, Some("store off"), place), (State::Warning, "call store: store off".to_string()));
-        assert_eq!(status_of(None, None, true, Some("store off"), place), (State::Warning, NO_FRAMES.to_string()));
-        assert_eq!(status_of(None, Some("cannot create"), true, Some("store off"), place), (State::Error, "cannot create".to_string()));
-        let refused = status_of(Some("new settings not taken: x"), Some("cannot create"), true, Some("s"), place);
+        assert_eq!(status_of(None, None, None, false, None, place), (State::Ok, place.to_string()));
+        assert_eq!(status_of(None, None, None, false, Some("store off"), place), (State::Warning, "call store: store off".to_string()));
+        assert_eq!(status_of(None, None, None, true, Some("store off"), place), (State::Warning, NO_FRAMES.to_string()));
+        assert_eq!(status_of(None, None, Some("cannot write"), true, Some("store off"), place), (State::Error, "cannot write".to_string()));
+        assert_eq!(status_of(None, Some("cannot create"), Some("cannot write"), true, Some("store off"), place), (State::Error, "cannot create".to_string()));
+        let refused = status_of(Some("new settings not taken: x"), Some("cannot create"), Some("cannot write"), true, Some("s"), place);
         assert_eq!(refused, (State::Error, "new settings not taken: x".to_string()));
     }
 
@@ -716,6 +746,7 @@ mod tests {
             capture_dir: dir,
             host_version: "0".into(),
             skipped: Arc::new(Mutex::new(BTreeMap::from([("analog".to_string(), 2)]))),
+            write_error: Arc::default(),
         };
         let snap = Snapshot {
             queued: 3,

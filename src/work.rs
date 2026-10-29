@@ -44,6 +44,8 @@ pub struct Ctx {
     pub host_version: String,
     /// How many calls were skipped, by reason.
     pub skipped: Arc<Mutex<BTreeMap<String, u64>>>,
+    /// Why the last write failed, until a call is written again: the status shows it.
+    pub write_error: Arc<Mutex<Option<String>>>,
 }
 
 /// A read lock, even on a lock a panic poisoned: the data behind it is plain settings.
@@ -121,8 +123,14 @@ pub fn process(ctx: &Ctx, job: &Job, warn: &dyn Fn(String)) -> Done {
         warn(format!("{}: {w}", call.path));
     }
     match write_atomic(&target, &built.bytes) {
-        Ok(()) => Done::Ok { took: started.elapsed(), bytes: built.bytes.len() as u64 },
-        Err(e) => Done::Retry(e),
+        Ok(()) => {
+            *lock(&ctx.write_error) = None;
+            Done::Ok { took: started.elapsed(), bytes: built.bytes.len() as u64 }
+        }
+        Err(e) => {
+            *lock(&ctx.write_error) = Some(e.clone());
+            Done::Retry(e)
+        }
     }
 }
 
@@ -144,6 +152,7 @@ mod tests {
             capture_dir: dir.to_path_buf(),
             host_version: "0.3.0".into(),
             skipped: Arc::default(),
+            write_error: Arc::default(),
         }
     }
 
@@ -249,7 +258,18 @@ mod tests {
         let dir = testing::temp_dir("work");
         let ctx = ctx_for(&dir, vec![]);
         let (call, _) = fixtures::sdr_call(&dir, SdrMode::P25Fdma, 35, 3);
-        std::fs::create_dir_all(call.files.json.with_extension("dvcf")).unwrap(); // a folder where the file should go
-        assert!(matches!(process(&ctx, &job(call, Kind::Live), &|_| {}), Done::Retry(m) if m.starts_with("cannot write ")));
+        let blocker = call.files.json.with_extension("dvcf");
+        std::fs::create_dir_all(&blocker).unwrap(); // a folder where the file should go
+        assert!(matches!(process(&ctx, &job(call.clone(), Kind::Live), &|_| {}), Done::Retry(m) if m.starts_with("cannot write ")));
+        let error = ctx.write_error.lock().unwrap().clone();
+        assert!(error.as_deref().is_some_and(|e| e.starts_with("cannot write ")), "the failed write is remembered: {error:?}");
+        // A skip leaves it; the next write clears it.
+        let mut analog = call.clone();
+        analog.call.audio_type = "analog".into();
+        assert_eq!(process(&ctx, &job(analog, Kind::Live), &|_| {}), Done::Skipped("analog".into()));
+        assert!(ctx.write_error.lock().unwrap().is_some());
+        std::fs::remove_dir(&blocker).unwrap();
+        assert!(matches!(process(&ctx, &job(call, Kind::Live), &|_| {}), Done::Ok { .. }));
+        assert_eq!(*ctx.write_error.lock().unwrap(), None);
     }
 }

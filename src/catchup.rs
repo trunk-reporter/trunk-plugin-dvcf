@@ -253,6 +253,7 @@ mod tests {
             capture_dir: dir.to_path_buf(),
             host_version: "0.3.0".into(),
             skipped: Arc::default(),
+            write_error: Arc::default(),
         }
     }
 
