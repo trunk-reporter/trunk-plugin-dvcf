@@ -1,0 +1,20 @@
+[package]
+name = "dvcf"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "Writes every digital call as a self-contained .dvcf file (SymbolStream v2) from Trunk Recorder Pro's frame capture."
+license = "GPL-3.0-or-later"
+repository = "https://github.com/trunk-reporter/trunk-plugin-dvcf"
+publish = false
+
+[dependencies]
+trunk-recorder-plugin = { git = "https://github.com/TrunkRecorder/trunk-recorder-pro", rev = "d9b1f16dd49d507e22d0835039144ac4e1e7e43b" }
+trunk-core = { git = "https://github.com/TrunkRecorder/trunk-recorder-pro", rev = "d9b1f16dd49d507e22d0835039144ac4e1e7e43b" }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+strip = true
+lto = true
